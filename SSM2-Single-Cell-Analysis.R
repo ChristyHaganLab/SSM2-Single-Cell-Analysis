@@ -249,28 +249,25 @@ if ( identical(parent.frame(), .GlobalEnv) && !interactive()) {
   }
 }
 
-
-
-
-
-
-
-
-
-
-
-
+loadLibrary <- function(package_name){
+	package_name=as.character(substitute(package_name))
+	setRepositories(graphics=F,ind=c(1,2,3,4,5,6,7))
+    if (!requireNamespace(package_name, quietly = TRUE)) {
+      install.packages(package_name, dependencies=T);
+    }
+     suppressPackageStartupMessages(library(package=package_name,character.only=T));
+}
 
 # Load required libraries
-library(R.utils)
-library(Seurat)
-library(Matrix)
-library(stringr)
-library(ggplot2)
-library(patchwork)
-library(plyr)
-library(dplyr)
-library(harmony)  # For batch correction
+loadLibrary(R.utils)
+loadLibrary(Seurat)
+loadLibrary(Matrix)
+loadLibrary(stringr)
+loadLibrary(ggplot2)
+loadLibrary(patchwork)
+loadLibrary(plyr)
+loadLibrary(dplyr)
+loadLibrary(harmony)  # For batch correction
 
 # Increase memory limit (Windows only - Mac/Linux users see below)
 if(.Platform$OS.type == "windows") {
@@ -1181,7 +1178,7 @@ figure3 <- function(){
 	  }
 	  BiocManager::install("EnhancedVolcano")
 	}
-	library(EnhancedVolcano)
+	loadLibrary(EnhancedVolcano)
 
 	# Create color scheme based on fold change direction
 	keyvals <- ifelse(
@@ -1318,7 +1315,7 @@ figure3 <- function(){
 	  }
 	  BiocManager::install("EnhancedVolcano")
 	}
-	library(EnhancedVolcano)
+	loadLibrary(EnhancedVolcano)
 
 
 	# Read the differential expression data
@@ -1432,11 +1429,11 @@ figure3 <- function(){
 
 	# Now load all libraries after installations are complete
 	print("Loading libraries...")
-	library(clusterProfiler)
-	library(org.Mm.eg.db)
-	library(enrichplot)
-	library(stringr)
-	library(forcats)
+	loadLibrary(clusterProfiler)
+	loadLibrary(org.Mm.eg.db)
+	loadLibrary(enrichplot)
+	loadLibrary(stringr)
+	loadLibrary(forcats)
 
 	# Extract downregulated and upregulated genes
 	negs <- cluster0.markers[cluster0.markers$avg_log2FC < 0,]$Gene
@@ -1505,8 +1502,8 @@ figure3 <- function(){
 	# | response to interferon-beta              | NADH dehydrogenase complex assembly         | ... |
 	# | antigen processing...                    | mitochondrial respiratory chain...          | ... |
 
-	library(readxl)
-	library(tidyr)
+	loadLibrary(readxl)
+	loadLibrary(tidyr)
 
 	#PROBLEM
 	#groupings_file <- "C:/Users/echowanec/Documents/GO downregulated pathways groupings .xlsx"
@@ -1644,11 +1641,11 @@ figure3 <- function(){
 
 	print("=== CREATING ATP/OXIDATIVE PHOSPHORYLATION HEATMAP (Fixed Labels) ===")
 
-	library(ComplexHeatmap)
-	library(circlize)
-	library(stringr)
-	library(grid)
-	library(dplyr)
+	loadLibrary(ComplexHeatmap)
+	loadLibrary(circlize)
+	loadLibrary(stringr)
+	loadLibrary(grid)
+	loadLibrary(dplyr)
 
 	# Use existing data from previous run
 	pathway_data <- as.data.frame(ggo.neg)
@@ -3459,11 +3456,11 @@ cellChatAnalysis <- function(){
 	rm(list = ls())
 
 	# Load required libraries
-	library(CellChat)
-	library(patchwork)
-	library(Seurat)
-	library(ggplot2)
-	library(ComplexHeatmap)
+	loadLibrary(CellChat)
+	loadLibrary(patchwork)
+	loadLibrary(Seurat)
+	loadLibrary(ggplot2)
+	loadLibrary(ComplexHeatmap)
 	options(stringsAsFactors = FALSE)
 
 	# ============================================================================
@@ -3809,9 +3806,9 @@ figure7 <- function(){
 	# FIGURE 7: SPP1 EXPRESSION VIOLIN PLOT IN MACROPHAGES
 	# ============================================================================
 
-	library(ggplot2)
-	library(dplyr)
-	library(Seurat)
+	loadLibrary(ggplot2)
+	loadLibrary(dplyr)
+	loadLibrary(Seurat)
 
 	# Set Figure 7 directory path
 	figure7_dir <- file.path(base_dir, "Figures", "Figure_7")
@@ -3927,9 +3924,9 @@ figure7 <- function(){
 	# FIGURE 7: CD44 EXPRESSION VIOLIN PLOT IN T CELLS, NK CELLS, AND TUMOR CELLS
 	# ============================================================================
 
-	library(ggplot2)
-	library(dplyr)
-	library(Seurat)
+	loadLibrary(ggplot2)
+	loadLibrary(dplyr)
+	loadLibrary(Seurat)
 
 	# Set Figure 7 directory path
 	figure7_dir <- file.path(base_dir, "Figures", "Figure_7")
