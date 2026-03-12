@@ -1233,12 +1233,69 @@ figure3 <- function(){
 	# Display the plot
 	print(p1)
 
+	### VOLCANO PLOT - UP GENES
+
+# Create color scheme based on fold change direction
+keyvals <- ifelse(
+  cluster0.markers$avg_log2FC < 0, 'royalblue',
+  ifelse(cluster0.markers$avg_log2FC > 0, 'red3', 'black'))
+keyvals[is.na(keyvals)] <- 'black'
+names(keyvals)[keyvals == 'red3'] <- 'high'
+names(keyvals)[keyvals == 'black'] <- 'mid'
+names(keyvals)[keyvals == 'royalblue'] <- 'low'
+
+# New gene list to label
+UP_labs <- c("Cdc14a", "Smc3", "Cdc14b", "Pten", "Cep290", "Mapre1",
+             "Lzts2", "Ift46", "Mns1", "Ube2b", "Aaas", "Mark2", "Map4", "Rae1",
+             "C2cd3", "Stmn1", "Bbs4", "Chmp4b", "Cep70", "Dnm2", "Hspa1b",
+             "Aurka", "Chmp3", "Cenph", "Ddb1", "Clasp2", "Kif2a", "Wnt4")
+
+
+# Remove the 4 genes from selectLab since we'll add them manually
+UP_labs_main <- UP_labs[!UP_labs %in% c("Wnt4", "Cdc14a")]
+
+v1 <- EnhancedVolcano(cluster0.markers,
+                      lab = cluster0.markers$Gene,
+                      selectLab = UP_labs_main,
+                      x = "avg_log2FC",
+                      y = "p_val_adj",
+                      xlim = c(-2, 2),
+                      ylim = c(0, 260),
+                      caption = NULL,
+                      axisLabSize = 30,
+                      xlab = bquote(~Log[2]~ "fold change"),
+                      ylab = bquote(~-Log[10]~"adjusted"~italic(p)),
+                      title = NULL,
+                      subtitle = "",
+                      pCutoff = 0.05,
+                      pointSize = 2.0,
+                      labSize = 9,
+                      labCol = 'black',
+                      labFace = 'plain',
+                      drawConnectors = TRUE,
+                      arrowheads = FALSE,
+                      boxedLabels = FALSE,
+                      colCustom = keyvals,
+                      FCcutoff = 0.25,
+                      legendPosition = "none",
+                      max.overlaps = Inf) +
+  annotate("text", x = 1.05, y = 255, label = "Wnt4", size = 9) +
+  annotate("text", x = 1.64, y = 250, label = "Cdc14a", size = 9)
+
+   print(v1)
+
 	# Save the plot
 	ggsave(file.path(figure3_dir, "tumor_progesterone_vs_placebo_volcano.pdf"),
 		   p1, width = 9, height = 12)
 
 	ggsave(file.path(figure3_dir, "tumor_progesterone_vs_placebo_volcano.png"),
 		   p1, width = 9, height = 12, dpi = 300)
+
+	ggsave(file.path(figure3_dir, "Volcano_up_regulegulated_genes.pdf"),
+		   v1,width=9,height=12)
+
+	ggsave(file.path(figure3_dir, "Volcano_up_regulegulated_genes.png"),
+		   v1, width = 9, height = 12, dpi = 300)
 
 	print("=== FIGURE 3 COMPLETE ===")
 	print(paste("Differential expression results saved to:", saveTag))
@@ -1987,26 +2044,231 @@ figure3 <- function(){
 
 }
 
+Figure4 <- function() {
+
+	# === FIGURE 4: TF ACTIVITY ANALYSIS: IMMUNE vs TUMOR (PLACEBO vs PROGESTERONE) ===
+
+	library(decoupleR)
+	library(dorothea)
+	library(Seurat)
+	library(dplyr)
+	library(tidyr)
+	library(tibble)
+
+	Figure4_dir <- file.path(base_dir, "Figures", "Figure_4")
+	if (!dir.exists(Figure4_dir)) dir.create(Figure4_dir, recursive = TRUE)
+	
+	# --- 1. Get DoRothEA TF-target network  ---
+	net <- dorothea_mm %>%
+	  filter(confidence %in% c("A", "B", "C")) %>%
+	  rename(source = tf, mor = mor, target = target)
+	
+	# --- 2. Join layers on FULL object first, then subset ---
+	SSM2sc[["RNA"]] <- JoinLayers(SSM2sc[["RNA"]])
+	
+	# Use cell_type_primary_final (not cell_type_primary)
+	immune <- subset(SSM2sc, subset = cell_type_primary_final == "Immune")
+	tumor <- subset(SSM2sc, subset = cell_type_primary_final == "Tumor")
+	
+	immune[["RNA"]] <- JoinLayers(immune[["RNA"]])
+	tumor[["RNA"]] <- JoinLayers(tumor[["RNA"]])
+	
+	# --- 3. Run TF activity inference ---
+	immune_acts <- run_wmean(
+	  mat = as.matrix(immune[["RNA"]]$data),  
+	  net = net,
+	  .source = "source",
+	  .target = "target",
+	  .mor = "mor",
+	  times = 100
+	)
+	
+	tumor_acts <- run_wmean(
+	  mat = as.matrix(tumor[["RNA"]]$data),
+	  net = net,
+	  .source = "source",
+	  .target = "target",
+	  .mor = "mor",
+	  times = 100
+	)
+	
+	# --- 4. Add TF activity scores as new assay ---
+	immune_tf <- immune_acts %>% filter(statistic == "norm_wmean")
+	tumor_tf <- tumor_acts %>% filter(statistic == "norm_wmean")
+	
+	immune_tf_mat <- immune_tf %>%
+	  pivot_wider(id_cols = "condition", names_from = "source", values_from = "score") %>%
+	  column_to_rownames("condition") %>%
+	  as.matrix() %>% t()
+	
+	tumor_tf_mat <- tumor_tf %>%
+	  pivot_wider(id_cols = "condition", names_from = "source", values_from = "score") %>%
+	  column_to_rownames("condition") %>%
+	  as.matrix() %>% t()
+	
+	immune[["tfact"]] <- CreateAssayObject(data = immune_tf_mat)
+	tumor[["tfact"]] <- CreateAssayObject(data = tumor_tf_mat)
+	
+	# --- 5. Compare TF activity: Wilcoxon test (NOT FindMarkers) ---
+	# FindMarkers fails on negative TF activity scores (log2FC produces NaN)
+	# Wilcoxon test works directly on raw scores
+	
+	run_wilcox <- function(seurat_obj) {
+	  tfs <- rownames(seurat_obj[["tfact"]])
+	  scores <- FetchData(seurat_obj, vars = tfs, assay = "tfact")
+	  scores$treatment <- seurat_obj$treatment
+	  
+	  results <- lapply(tfs, function(tf) {
+	    w <- wilcox.test(scores[[tf]] ~ scores$treatment)
+	    data.frame(
+	      TF = tf,
+	      mean_progesterone = mean(scores[[tf]][scores$treatment == "progesterone"]),
+	      mean_placebo = mean(scores[[tf]][scores$treatment == "placebo"]),
+	      diff = mean(scores[[tf]][scores$treatment == "progesterone"]) - 
+	        mean(scores[[tf]][scores$treatment == "placebo"]),
+	      p_val = w$p.value
+	    )
+	  }) %>% bind_rows()
+	  
+	  results$p_val_adj <- p.adjust(results$p_val, method = "BH")
+	  results %>% arrange(p_val_adj)
+	}
+	
+	immune_tf_results <- run_wilcox(immune)
+	tumor_tf_results <- run_wilcox(tumor)
+	
+	# --- 6. Add DoRothEA confidence levels ---
+	tf_confidence <- net %>%
+	  group_by(source) %>%
+	  summarise(best_confidence = min(confidence))
+	
+	immune_tf_results <- merge(immune_tf_results, tf_confidence, by.x = "TF", by.y = "source", all.x = TRUE)
+	tumor_tf_results <- merge(tumor_tf_results, tf_confidence, by.x = "TF", by.y = "source", all.x = TRUE)
+	
+	# --- 7. Save ---
+	write.csv(immune_tf_results, "immune_diff_TFs_wilcox.csv", row.names = FALSE)
+	
+	# Filter for significant TFs
+	sig_immune <- immune_tf_results %>% filter(p_val_adj < 0.01) %>% pull(TF)
+	sig_tumor <- tumor_tf_results %>% filter(p_val_adj < 0.01) %>% pull(TF)
+	
+	
+	## IMMUNE AND TUMOR ONLY ## 
+	
+	immune_only2 <- setdiff(sig_immune, sig_tumor)
+	tumor_only2 <- setdiff(sig_tumor, sig_immune)
+	
+	## DOTPLOT FOR TUMOR TFs - UNIQUE
+	library(ggplot2)
+	library(dplyr)
+	
+	# Calculate percent of cells expressing each TF
+	calc_pct_expressing <- function(seurat_obj, tfs) {
+	  scores <- FetchData(seurat_obj, vars = tfs, assay = "tfact")
+	  sapply(tfs, function(tf) {
+	    sum(scores[[tf]] > 0) / nrow(scores) * 100
+	  })
+	}
+	
+	# Get tumor-only TF results
+	dot_df_tumor <- tumor_tf_results %>%
+	  filter(TF %in% tumor_only2) %>%
+	  filter(!TF %in% c("Mbd2", "Yy1")) %>%
+	  dplyr::select(TF, diff, p_val_adj) %>%
+	  mutate(
+	    direction = ifelse(diff > 0, "Up", "Down"),
+	    neg_log10_p = -log10(p_val_adj),
+	    abs_diff = abs(diff)
+	  )
+	
+	# Add percent expressing
+	tumor_only2_plot <- tumor_only2[!tumor_only2 %in% c("Mbd2", "Yy1")]
+	pct <- calc_pct_expressing(tumor, tumor_only2_plot)
+	dot_df_tumor$pct_expressing <- pct[dot_df_tumor$TF]
+	
+	# Order TFs by p-value
+	dot_df_tumor$TF <- factor(dot_df_tumor$TF, levels = dot_df_tumor$TF[order(dot_df_tumor$neg_log10_p)])
+	dot_df_tumor$neg_log10_p[is.infinite(dot_df_tumor$neg_log10_p)] <- 350
+	
+	dotplot_tumor <- ggplot(dot_df_tumor, aes(x = neg_log10_p, y = TF)) +
+	  geom_point(aes(size = pct_expressing, color = diff)) +
+	  scale_color_gradient2(low = "darkblue", mid = "white", high = "darkred", midpoint = 0,
+	                        name = "Effect Size") +
+	  scale_size_continuous(range = c(3, 10), name = "% Cells\nExpressing") +
+	  theme_minimal() +
+	  theme(axis.text.y = element_text(size = 16, face = "bold"),
+	        axis.text.x = element_text(size = 16), 
+	        axis.title.x = element_text(size = 14),
+	        legend.title = element_text(size = 14),
+	        legend.text = element_text(size = 14))+
+	  xlab(expression(-Log[10]~"adjusted"~italic(p))) + ylab("") +
+	  xlim(0, 375)
+	
+	print(dotplot_tumor)
+	
+	
+	## DOTPLOT FOR IMMUNE TFs - UNIQUE
+	dot_df_immune <- immune_tf_results %>%
+	  filter(TF %in% immune_only2) %>%
+	  filter(TF != "Mafg") %>% 
+	  dplyr::select(TF, diff, p_val_adj) %>%
+	  mutate(
+	    direction = ifelse(diff > 0, "Up", "Down"),
+	    neg_log10_p = -log10(p_val_adj),
+	    abs_diff = abs(diff)
+	    )
+	
+	# Add percent expressing
+	immune_only2_plot <- immune_only2[immune_only2 != "Mafg"]
+	pct_immune <- calc_pct_expressing(immune, immune_only2)
+	dot_df_immune$pct_expressing <- pct_immune[dot_df_immune$TF]
+	
+	# Order TFs by p-value
+	dot_df_immune$TF <- factor(dot_df_immune$TF, levels = dot_df_immune$TF[order(dot_df_immune$neg_log10_p)])
+	dot_df_immune$neg_log10_p[is.infinite(dot_df_immune$neg_log10_p)] <- 350
+	 
+	  # After capping at 350, add small offsets
+	  inf_idx <- which(dot_df_immune$neg_log10_p == 350)
+	dot_df_immune$neg_log10_p[inf_idx] <- 350 + seq(0, length(inf_idx) - 1) * 5
+	 
+	  dotplot_immune <- ggplot(dot_df_immune, aes(x = neg_log10_p, y = TF)) +
+	  geom_point(aes(size = pct_expressing, color = diff)) +
+	  scale_color_gradient2(low = "darkblue", mid = "white", high = "darkred", midpoint = 0,
+	                              +                           name = "Effect Size") +
+	  scale_size_continuous(range = c(3, 10), name = "% Cells\nExpressing") +
+	  theme_minimal() +
+	  theme(axis.text.y = element_text(size = 16, face = "bold"),
+	              axis.text.x = element_text(size = 16), 
+	              axis.title.x = element_text(size = 14),
+	              legend.title = element_text(size = 14),
+	              legend.text = element_text(size = 14))+
+	  xlab(expression(-Log[10]~"adjusted"~italic(p))) + ylab("") +
+	  xlim(0, 375)
+	
+	print(dotplot_immune)
+	ggsave(file.path(Figure4_dir, "dotplot_immune_TF_largerfont.png"), dotplot_immune, width = 10, height = 8, dpi = 300)
+  }
+									 
 
 
 
 
-figure4 <- function(){
-	print("Generating figure4")
+Figure5 <- function(){
+	print("Generating Figure5")
 		getData("SSM2sc_with_celltypes.RDS","SSM2sc")
 
 
 	# ============================================================================
-	# FIGURE 4: T CELL PERCENTAGE OF IMMUNE CELLS BY TREATMENT GROUP
+	# Figure 5: T CELL PERCENTAGE OF IMMUNE CELLS BY TREATMENT GROUP
 	# ============================================================================
 
-	# Create Figure 4 subdirectory
-	figure4_dir <- file.path(base_dir, "Figures", "Figure_4")
-	if (!dir.exists(figure4_dir)) dir.create(figure4_dir, recursive = TRUE)
+	# Create Figure 5 subdirectory
+	Figure5_dir <- file.path(base_dir, "Figures", "Figure_5")
+	if (!dir.exists(Figure5_dir)) dir.create(Figure5_dir, recursive = TRUE)
 
 	# Verify the directory was created successfully
-	if (!dir.exists(figure4_dir)) {
-	  stop(paste("ERROR: Could not create directory:", figure4_dir,
+	if (!dir.exists(Figure5_dir)) {
+	  stop(paste("ERROR: Could not create directory:", Figure5_dir,
 				 "\nCheck that you have write permissions for this location."))
 	}
 
@@ -2018,7 +2280,7 @@ figure4 <- function(){
 
 
 
-	print("=== FIGURE 4: T CELL PERCENTAGE OF IMMUNE CELLS BY TREATMENT ===")
+	print("=== Figure 5: T CELL PERCENTAGE OF IMMUNE CELLS BY TREATMENT ===")
 
 	# Rename T cell labels in metadata for clearer visualization
 	print("Renaming T cell subtypes in metadata...")
@@ -2096,19 +2358,19 @@ figure4 <- function(){
 	print(p_tcell_percent)
 
 	# Save plot
-	ggsave(file.path(figure4_dir, "tcell_percentage_by_treatment.pdf"),
+	ggsave(file.path(Figure5_dir, "tcell_percentage_by_treatment.pdf"),
 		   p_tcell_percent, width = 8, height = 6)
-	ggsave(file.path(figure4_dir, "tcell_percentage_by_treatment.png"),
+	ggsave(file.path(Figure5_dir, "tcell_percentage_by_treatment.png"),
 		   p_tcell_percent, width = 8, height = 6, dpi = 300)
 
 	# Save the data table
 	write.csv(count_df, 
-			  file.path(figure4_dir, "tcell_percentage_data.csv"), 
+			  file.path(Figure5_dir, "tcell_percentage_data.csv"), 
 			  row.names = FALSE)
 
-	print("=== FIGURE 4 COMPLETE ===")
+	print("=== Figure 5 COMPLETE ===")
 	print(paste("T cell percentage bar plot saved to:", 
-				file.path(figure4_dir, "tcell_percentage_by_treatment.png")))
+				file.path(Figure5_dir, "tcell_percentage_by_treatment.png")))
 
 	# ============================================================================
 	# SUPPLEMENTAL FIGURE: T CELL AND NK CELL MARKER GENES
@@ -2330,7 +2592,7 @@ figure4 <- function(){
 
 
 	# ============================================================================
-	# FIGURE 4: T CELL PROPORTION STACKED BAR PLOT
+	# Figure 5: T CELL PROPORTION STACKED BAR PLOT
 	# ============================================================================
 
 	print("Creating T cell proportion stacked bar plot...")
@@ -2383,13 +2645,13 @@ figure4 <- function(){
 	  coord_flip()
 
 	print(p_tcell_proportion)
-	ggsave(file.path(figure4_dir, "tcell_proportion_stacked.pdf"), 
+	ggsave(file.path(Figure5_dir, "tcell_proportion_stacked.pdf"), 
 		   p_tcell_proportion, width = 10, height = 4)
-	ggsave(file.path(figure4_dir, "tcell_proportion_stacked.png"), 
+	ggsave(file.path(Figure5_dir, "tcell_proportion_stacked.png"), 
 		   p_tcell_proportion, width = 10, height = 4, dpi = 300)
 
 	# ============================================================================
-	# FIGURE 4: STATISTICAL COMPARISON OF T CELL PROPORTIONS
+	# Figure 5: STATISTICAL COMPARISON OF T CELL PROPORTIONS
 	# ============================================================================
 
 	print("Performing statistical analysis of T cell and NK proportions...")
@@ -2466,14 +2728,14 @@ figure4 <- function(){
 	results <- results[order(results$p_adj), ]
 
 	# Save results as CSV
-	write.csv(results, file.path(figure4_dir, "tcell_statistical_comparison.csv"), row.names = FALSE)
+	write.csv(results, file.path(Figure5_dir, "tcell_statistical_comparison.csv"), row.names = FALSE)
 
 	# Save results as Excel file (requires writexl or openxlsx package)
 	if(require(writexl, quietly = TRUE)) {
-	  write_xlsx(results, file.path(figure4_dir, "tcell_statistical_comparison.xlsx"))
+	  write_xlsx(results, file.path(Figure5_dir, "tcell_statistical_comparison.xlsx"))
 	  print("Statistical results saved as Excel file")
 	} else if(require(openxlsx, quietly = TRUE)) {
-	  write.xlsx(results, file.path(figure4_dir, "tcell_statistical_comparison.xlsx"))
+	  write.xlsx(results, file.path(Figure5_dir, "tcell_statistical_comparison.xlsx"))
 	  print("Statistical results saved as Excel file")
 	} else {
 	  print("Note: Install 'writexl' or 'openxlsx' package to save as Excel file")
@@ -2483,7 +2745,7 @@ figure4 <- function(){
 	print(results)
 
 	# ============================================================================
-	# FIGURE 4: T CELL UMAP
+	# Figure 5: T CELL UMAP
 	# ============================================================================
 
 	print("Creating T cell and NK UMAP...")
@@ -2519,9 +2781,9 @@ figure4 <- function(){
 	  guides(color = guide_legend(override.aes = list(size = 4)))
 
 	print(p_tcell_umap)
-	ggsave(file.path(figure4_dir, "tcell_umap.pdf"), 
+	ggsave(file.path(Figure5_dir, "tcell_umap.pdf"), 
 		   p_tcell_umap, width = 10, height = 8)
-	ggsave(file.path(figure4_dir, "tcell_umap.png"), 
+	ggsave(file.path(Figure5_dir, "tcell_umap.png"), 
 		   p_tcell_umap, width = 10, height = 8, dpi = 300)
 
 	# Create UMAP for placebo treatment only
@@ -2546,9 +2808,9 @@ figure4 <- function(){
 	  guides(color = guide_legend(override.aes = list(size = 4)))
 
 	print(p_tcell_umap_placebo)
-	ggsave(file.path(figure4_dir, "tcell_umap_placebo.pdf"), 
+	ggsave(file.path(Figure5_dir, "tcell_umap_placebo.pdf"), 
 		   p_tcell_umap_placebo, width = 10, height = 8)
-	ggsave(file.path(figure4_dir, "tcell_umap_placebo.png"), 
+	ggsave(file.path(Figure5_dir, "tcell_umap_placebo.png"), 
 		   p_tcell_umap_placebo, width = 10, height = 8, dpi = 300)
 
 	# Create UMAP for progesterone treatment only
@@ -2573,35 +2835,37 @@ figure4 <- function(){
 	  guides(color = guide_legend(override.aes = list(size = 4)))
 
 	print(p_tcell_umap_progesterone)
-	ggsave(file.path(figure4_dir, "tcell_umap_progesterone.pdf"), 
+	ggsave(file.path(Figure5_dir, "tcell_umap_progesterone.pdf"), 
 		   p_tcell_umap_progesterone, width = 10, height = 8)
-	ggsave(file.path(figure4_dir, "tcell_umap_progesterone.png"), 
+	ggsave(file.path(Figure5_dir, "tcell_umap_progesterone.png"), 
 		   p_tcell_umap_progesterone, width = 10, height = 8, dpi = 300)
 
 }
 
-figure5 <- function(){
-	print("Generating figure5")
+Figure6 <- function(){
+	print("Generating Figure6")
 		getData("SSM2sc_with_celltypes.RDS","SSM2sc")
 
 
 
 
 	# ============================================================================
-	# FIGURE 5: NEUTROPHIL PERCENTAGE OF IMMUNE CELLS BY TREATMENT
+	# Figure 6: NEUTROPHIL PERCENTAGE OF IMMUNE CELLS BY TREATMENT
 	# ============================================================================
-
-	# Create Figure 5 subdirectory
-	figure5_dir <- file.path(base_dir, "Figures", "Figure_5")
-	if (!dir.exists(figure5_dir)) dir.create(figure5_dir, recursive = TRUE)
+	supplemental_dir <- file.path(base_dir, "Figures", "Supplemental_figures")
+	if (!dir.exists(supplemental_dir)) dir.create(supplemental_dir, recursive = TRUE)
+	
+	# Create Figure 6 subdirectory
+	Figure6_dir <- file.path(base_dir, "Figures", "Figure_6")
+	if (!dir.exists(Figure6_dir)) dir.create(Figure6_dir, recursive = TRUE)
 
 	# Verify the directory was created successfully
-	if (!dir.exists(figure5_dir)) {
-	  stop(paste("ERROR: Could not create directory:", figure5_dir,
+	if (!dir.exists(Figure6_dir)) {
+	  stop(paste("ERROR: Could not create directory:", Figure6_dir,
 				 "\nCheck that you have write permissions for this location."))
 	}
 
-	print("=== FIGURE 5: NEUTROPHIL PERCENTAGE OF IMMUNE CELLS BY TREATMENT ===")
+	print("=== Figure 6: NEUTROPHIL PERCENTAGE OF IMMUNE CELLS BY TREATMENT ===")
 
 	# Subset to immune cells only
 	SSM2sc_immune <- subset(SSM2sc, subset = cell_type_primary_final == "Immune")
@@ -2664,21 +2928,21 @@ figure5 <- function(){
 	print(p_neutrophil_percent)
 
 	# Save plot
-	ggsave(file.path(figure5_dir, "neutrophil_percentage_by_treatment.pdf"),
+	ggsave(file.path(Figure6_dir, "neutrophil_percentage_by_treatment.pdf"),
 		   p_neutrophil_percent, width = 8, height = 6)
-	ggsave(file.path(figure5_dir, "neutrophil_percentage_by_treatment.png"),
+	ggsave(file.path(Figure6_dir, "neutrophil_percentage_by_treatment.png"),
 		   p_neutrophil_percent, width = 8, height = 6, dpi = 300)
 
 	# Save the data table
 	write.csv(count_df_neut, 
-			  file.path(figure5_dir, "neutrophil_percentage_data.csv"), 
+			  file.path(Figure6_dir, "neutrophil_percentage_data.csv"), 
 			  row.names = FALSE)
 
-	print("=== FIGURE 5 COMPLETE ===")
+	print("=== Figure 6 COMPLETE ===")
 	print(paste("Neutrophil percentage bar plot saved to:", 
-				file.path(figure5_dir, "neutrophil_percentage_by_treatment.png")))
+				file.path(Figure6_dir, "neutrophil_percentage_by_treatment.png")))
 	# ============================================================================
-	# FIGURE 5: MACROPHAGE PERCENTAGE OF IMMUNE CELLS BY TREATMENT
+	# Figure 6: MACROPHAGE PERCENTAGE OF IMMUNE CELLS BY TREATMENT
 	# ============================================================================
 
 	print("=== CREATING MACROPHAGE PERCENTAGE BAR PLOT ===")
@@ -2750,22 +3014,22 @@ figure5 <- function(){
 	print(p_macrophage_percent)
 
 	# Save plot
-	ggsave(file.path(figure5_dir, "macrophage_percentage_by_treatment.pdf"),
+	ggsave(file.path(Figure6_dir, "macrophage_percentage_by_treatment.pdf"),
 		   p_macrophage_percent, width = 8, height = 6)
-	ggsave(file.path(figure5_dir, "macrophage_percentage_by_treatment.png"),
+	ggsave(file.path(Figure6_dir, "macrophage_percentage_by_treatment.png"),
 		   p_macrophage_percent, width = 8, height = 6, dpi = 300)
 
 	# Save the data table
 	write.csv(count_df_macro, 
-			  file.path(figure5_dir, "macrophage_percentage_data.csv"), 
+			  file.path(Figure6_dir, "macrophage_percentage_data.csv"), 
 			  row.names = FALSE)
 
 	print("=== MACROPHAGE PERCENTAGE BAR PLOT COMPLETE ===")
 	print(paste("Macrophage percentage bar plot saved to:", 
-				file.path(figure5_dir, "macrophage_percentage_by_treatment.png")))
+				file.path(Figure6_dir, "macrophage_percentage_by_treatment.png")))
 
 	# ============================================================================
-	# FIGURE 5: MACROPHAGE MARKER GENES
+	# Supplemental Figure: MACROPHAGE MARKER GENES
 	# ============================================================================
 
 	print("=== MACROPHAGE MARKER GENE ANALYSIS ===")
@@ -2775,7 +3039,7 @@ figure5 <- function(){
 	SSM2sc$cell_type_secondary <- as.character(SSM2sc$cell_type_secondary)
 	SSM2sc$cell_type_secondary[SSM2sc$cell_type_secondary == "Macrophage 1"] <- "LAM"
 	SSM2sc$cell_type_secondary[SSM2sc$cell_type_secondary == "Macrophage 2"] <- "Inflammatory"
-	SSM2sc$cell_type_secondary[SSM2sc$cell_type_secondary == "Macrophage 3"] <- "TAM"
+	SSM2sc$cell_type_secondary[SSM2sc$cell_type_secondary == "Macrophage 3"] <- "AA"
 	SSM2sc$cell_type_secondary[SSM2sc$cell_type_secondary == "Macrophage 4"] <- "Undefined"
 	SSM2sc$cell_type_secondary[SSM2sc$cell_type_secondary == "Macrophage 5"] <- "TA"
 	SSM2sc$cell_type_secondary[SSM2sc$cell_type_secondary == "Macrophage 6"] <- "Proliferative"
@@ -2785,7 +3049,7 @@ figure5 <- function(){
 	print("Updated Seurat object saved with renamed macrophage labels")
 
 	# Define macrophage types (now using renamed labels)
-	macrophage_types_renamed <- c("LAM", "Inflammatory", "TAM", "Undefined", "TA", "Proliferative")
+	macrophage_types_renamed <- c("LAM", "Inflammatory", "AA", "Undefined", "TA", "Proliferative")
 
 	# Subset to macrophages
 	SSM2sc_macrophages_markers <- subset(SSM2sc, subset = cell_type_secondary %in% macrophage_types_renamed)
@@ -2899,24 +3163,24 @@ figure5 <- function(){
 	  print(p_macrophage_markers)
 	  
 	  # Save outputs
-	  ggsave(file.path(figure5_dir, "macrophage_marker_dotplot.pdf"), 
+	  ggsave(file.path(supplemental_dir, "macrophage_marker_dotplot.pdf"), 
 			 p_macrophage_markers, width = 12, height = 14)
-	  ggsave(file.path(figure5_dir, "macrophage_marker_dotplot.png"), 
+	  ggsave(file.path(supplemental_dir, "macrophage_marker_dotplot.png"), 
 			 p_macrophage_markers, width = 12, height = 14, dpi = 300)
 	  write.csv(main_list, 
-				file.path(figure5_dir, "macrophage_top_markers.csv"), 
+				file.path(supplemental_dir, "macrophage_top_markers.csv"), 
 				row.names = FALSE)
 	  
 	  print("=== MACROPHAGE MARKER ANALYSIS COMPLETE ===")
-	  print(paste("Marker dot plot saved to:", file.path(figure5_dir, "macrophage_marker_dotplot.png")))
-	  print(paste("Marker gene list saved to:", file.path(figure5_dir, "macrophage_top_markers.csv")))
+	  print(paste("Marker dot plot saved to:", file.path(Figure6_dir, "macrophage_marker_dotplot.png")))
+	  print(paste("Marker gene list saved to:", file.path(Figure6_dir, "macrophage_top_markers.csv")))
 	  
 	} else {
 	  print("No FDR-significant marker genes found for macrophages")
 	}
 
 	# ============================================================================
-	# FIGURE 5: MACROPHAGE UMAP
+	# Figure 6: MACROPHAGE UMAP
 	# ============================================================================
 
 	print("=== CREATING MACROPHAGE UMAP ===")
@@ -2927,14 +3191,14 @@ figure5 <- function(){
 	# Set factor levels to match the order of colors
 	SSM2sc_macrophages_umap$cell_type_secondary <- factor(
 	  SSM2sc_macrophages_umap$cell_type_secondary,
-	  levels = c("LAM", "Inflammatory", "TAM", "Undefined", "TA", "Proliferative")
+	  levels = c("LAM", "Inflammatory", "AA", "Undefined", "TA", "Proliferative")
 	)
 
 	# Define custom colors for macrophages
 	macrophage_colors <- c(
 	  "LAM" = "#16FF32",
 	  "Inflammatory" = "#3283FE",
-	  "TAM" = "#7ED7D1",
+	  "AA" = "#7ED7D1",
 	  "Undefined" = "#325A9B",
 	  "TA" = "#DEA0FD",
 	  "Proliferative" = "#C4451C"
@@ -2961,17 +3225,17 @@ figure5 <- function(){
 	print(p_macrophage_umap)
 
 	# Save UMAP
-	ggsave(file.path(figure5_dir, "macrophage_umap.pdf"), 
+	ggsave(file.path(Figure6_dir, "macrophage_umap.pdf"), 
 		   p_macrophage_umap, width = 10, height = 8)
-	ggsave(file.path(figure5_dir, "macrophage_umap.png"), 
+	ggsave(file.path(Figure6_dir, "macrophage_umap.png"), 
 		   p_macrophage_umap, width = 10, height = 8, dpi = 300)
 
 	print("=== MACROPHAGE UMAP COMPLETE ===")
-	print(paste("Macrophage UMAP saved to:", file.path(figure5_dir, "macrophage_umap.png")))
+	print(paste("Macrophage UMAP saved to:", file.path(Figure6_dir, "macrophage_umap.png")))
 
 
 	# ============================================================================
-	# FIGURE 5: MACROPHAGE UMAP BY TREATMENT
+	# Figure 6: MACROPHAGE UMAP BY TREATMENT
 	# ============================================================================
 
 	print("=== CREATING TREATMENT-SPECIFIC MACROPHAGE UMAPS ===")
@@ -2998,9 +3262,9 @@ figure5 <- function(){
 	  guides(color = guide_legend(override.aes = list(size = 4)))
 
 	print(p_macrophage_umap_placebo)
-	ggsave(file.path(figure5_dir, "macrophage_umap_placebo.pdf"), 
+	ggsave(file.path(Figure6_dir, "macrophage_umap_placebo.pdf"), 
 		   p_macrophage_umap_placebo, width = 10, height = 8)
-	ggsave(file.path(figure5_dir, "macrophage_umap_placebo.png"), 
+	ggsave(file.path(Figure6_dir, "macrophage_umap_placebo.png"), 
 		   p_macrophage_umap_placebo, width = 10, height = 8, dpi = 300)
 
 	# Create UMAP for progesterone treatment only
@@ -3025,16 +3289,16 @@ figure5 <- function(){
 	  guides(color = guide_legend(override.aes = list(size = 4)))
 
 	print(p_macrophage_umap_progesterone)
-	ggsave(file.path(figure5_dir, "macrophage_umap_progesterone.pdf"), 
+	ggsave(file.path(Figure6_dir, "macrophage_umap_progesterone.pdf"), 
 		   p_macrophage_umap_progesterone, width = 10, height = 8)
-	ggsave(file.path(figure5_dir, "macrophage_umap_progesterone.png"), 
+	ggsave(file.path(Figure6_dir, "macrophage_umap_progesterone.png"), 
 		   p_macrophage_umap_progesterone, width = 10, height = 8, dpi = 300)
 
 	print("=== TREATMENT-SPECIFIC MACROPHAGE UMAPS COMPLETE ===")
 
 
 	# ============================================================================
-	# FIGURE 5: MACROPHAGE STACKED BAR PLOT
+	# Figure 6: MACROPHAGE STACKED BAR PLOT
 	# ============================================================================
 
 	print("=== CREATING MACROPHAGE STACKED BAR PLOT ===")
@@ -3077,16 +3341,16 @@ figure5 <- function(){
 	#print(p_macrophage_proportion)
 
 	# Save stacked bar plot
-	ggsave(file.path(figure5_dir, "macrophage_proportion_stacked.pdf"), 
+	ggsave(file.path(Figure6_dir, "macrophage_proportion_stacked.pdf"), 
 		   p_macrophage_proportion, width = 10, height = 4)
-	ggsave(file.path(figure5_dir, "macrophage_proportion_stacked.png"), 
+	ggsave(file.path(Figure6_dir, "macrophage_proportion_stacked.png"), 
 		   p_macrophage_proportion, width = 10, height = 4, dpi = 300)
 
 	print("=== MACROPHAGE STACKED BAR PLOT COMPLETE ===")
-	print(paste("Macrophage stacked bar plot saved to:", file.path(figure5_dir, "macrophage_proportion_stacked.png")))
+	print(paste("Macrophage stacked bar plot saved to:", file.path(Figure6_dir, "macrophage_proportion_stacked.png")))
 
 	# ============================================================================
-	# FIGURE 5: MACROPHAGE STATISTICAL COMPARISON
+	# Figure 6: MACROPHAGE STATISTICAL COMPARISON
 	# ============================================================================
 
 	print("=== PERFORMING MACROPHAGE STATISTICAL ANALYSIS ===")
@@ -3179,14 +3443,14 @@ figure5 <- function(){
 	  print(results)
 	  
 	  # Save results as CSV
-	  write.csv(results, file.path(figure5_dir, "macrophage_statistical_comparison.csv"), row.names = FALSE)
+	  write.csv(results, file.path(Figure6_dir, "macrophage_statistical_comparison.csv"), row.names = FALSE)
 	  
 	  # Save results as Excel file (requires writexl or openxlsx package)
 	  if(require(writexl, quietly = TRUE)) {
-		write_xlsx(results, file.path(figure5_dir, "macrophage_statistical_comparison.xlsx"))
+		write_xlsx(results, file.path(Figure6_dir, "macrophage_statistical_comparison.xlsx"))
 		print("Statistical results saved as Excel file")
 	  } else if(require(openxlsx, quietly = TRUE)) {
-		write.xlsx(results, file.path(figure5_dir, "macrophage_statistical_comparison.xlsx"))
+		write.xlsx(results, file.path(Figure6_dir, "macrophage_statistical_comparison.xlsx"))
 		print("Statistical results saved as Excel file")
 	  }
 	  
@@ -3213,28 +3477,28 @@ figure5 <- function(){
 
 	}
 
-figure6 <- function(){
-	print("Generating figure6")
+Figure7 <- function(){
+	print("Generating Figure7")
 	getData("SSM2sc_with_celltypes.RDS","SSM2sc")
 
 
 
 	# ============================================================================
-	# FIGURE 6: LAM GENE SIGNATURE ANALYSIS
+	# Figure 7: LAM GENE SIGNATURE ANALYSIS
 	# ============================================================================
 
-	# Create Figure 6 subdirectory
-	figure6_dir <- file.path(base_dir, "Figures", "Figure_6")
-	if (!dir.exists(figure6_dir)) dir.create(figure6_dir, recursive = TRUE)
+	# Create Figure 7 subdirectory
+	Figure7_dir <- file.path(base_dir, "Figures", "Figure_7")
+	if (!dir.exists(Figure7_dir)) dir.create(Figure7_dir, recursive = TRUE)
 
 	# Verify the directory was created successfully
-	if (!dir.exists(figure6_dir)) {
-	  stop(paste("ERROR: Could not create directory:", figure6_dir,
+	if (!dir.exists(Figure7_dir)) {
+	  stop(paste("ERROR: Could not create directory:", Figure7_dir,
 				 "\nCheck that you have write permissions for this location."))
 	}
 
 	# Define macrophage types (now using renamed labels)
-	  macrophage_types_renamed <- c("LAM", "Inflammatory", "TAM", "Undefined", "TA", "Proliferative")
+	  macrophage_types_renamed <- c("LAM", "Inflammatory", "AA", "Undefined", "TA", "Proliferative")
 
 	  # Subset to macrophages for visualization (using the full SSM2sc object to preserve UMAP)
 	  SSM2sc_macrophages_umap <- subset(SSM2sc, subset = cell_type_secondary %in% macrophage_types_renamed)
@@ -3242,10 +3506,10 @@ figure6 <- function(){
 	  # Set factor levels to match the order of colors
 	  SSM2sc_macrophages_umap$cell_type_secondary <- factor(
 		SSM2sc_macrophages_umap$cell_type_secondary,
-		levels = c("LAM", "Inflammatory", "TAM", "Undefined", "TA", "Proliferative")
+		levels = c("LAM", "Inflammatory", "AA", "Undefined", "TA", "Proliferative")
 	  )
 
-	print("=== FIGURE 6: LAM GENE SIGNATURE ANALYSIS ===")
+	print("=== Figure 7: LAM GENE SIGNATURE ANALYSIS ===")
 
 	# Define LAM signature genes
 	LAM_genes <- c("Trem2", "Lipa", "Ctsb", "Ctss", "Fabp5", "Lgals1", "Lgals3", "Cd9", "Apoe", "Spp1")
@@ -3269,7 +3533,7 @@ figure6 <- function(){
 	)
 
 	# ============================================================================
-	# FIGURE 6: INDIVIDUAL LAM GENE FEATURE PLOTS
+	# Figure 7: INDIVIDUAL LAM GENE FEATURE PLOTS
 	# ============================================================================
 
 	print("Creating individual LAM gene feature plots...")
@@ -3315,9 +3579,9 @@ figure6 <- function(){
 	  gene_grid <- wrap_plots(gene_plots, ncol = ncols, nrow = nrows)
 	  
 	  # Save individual gene plots
-	  ggsave(file.path(figure6_dir, "LAM_genes_feature_plots.pdf"),
+	  ggsave(file.path(Figure7_dir, "LAM_genes_feature_plots.pdf"),
 			 gene_grid, width = 16, height = 4 * nrows, dpi = 300)
-	  ggsave(file.path(figure6_dir, "LAM_genes_feature_plots.png"),
+	  ggsave(file.path(Figure7_dir, "LAM_genes_feature_plots.png"),
 			 gene_grid, width = 16, height = 4 * nrows, dpi = 300)
 	  
 	  cat("Individual LAM gene feature plots saved!\n")
@@ -3326,7 +3590,7 @@ figure6 <- function(){
 	print("=== INDIVIDUAL LAM GENE FEATURE PLOTS COMPLETE ===")
 
 	# ============================================================================
-	# FIGURE 6: LAM SCORE BY TREATMENT
+	# Figure 7: LAM SCORE BY TREATMENT
 	# ============================================================================
 
 	print("Creating LAM score violin plot by treatment...")
@@ -3433,13 +3697,13 @@ figure6 <- function(){
 	print(p_lam_violin)
 
 	# Save violin plot
-	ggsave(file.path(figure6_dir, "LAM_score_by_treatment.pdf"), 
+	ggsave(file.path(Figure7_dir, "LAM_score_by_treatment.pdf"), 
 		   p_lam_violin, width = 6, height = 8)
-	ggsave(file.path(figure6_dir, "LAM_score_by_treatment.png"), 
+	ggsave(file.path(Figure7_dir, "LAM_score_by_treatment.png"), 
 		   p_lam_violin, width = 6, height = 8, dpi = 300)
 
 	print("=== LAM SCORE VIOLIN PLOT COMPLETE ===")
-	print(paste("All Figure 6 outputs saved to:", figure6_dir))
+	print(paste("All Figure 7 outputs saved to:", Figure7_dir))
 
 
 }
@@ -3472,7 +3736,7 @@ cellChatAnalysis <- function(){
 
 	# Set up folder paths
 	figures_dir <- file.path(base_dir, "Figures")
-	output_dir <- file.path(figures_dir, "Figure_7")
+	output_dir <- file.path(figures_dir, "Figure_8")
 	dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
 	# Input file path
@@ -3487,7 +3751,7 @@ cellChatAnalysis <- function(){
 	  "CD4+ Treg" = "#5A5156",
 	  "LAM" = "#16FF32",
 	  "Inflammatory" = "#3283FE",
-	  "TAM" = "#7ED7D1",
+	  "AA" = "#7ED7D1",
 	  "Undefined" = "#325A9B",
 	  "TA" = "#DEA0FD",
 	  "Proliferative" = "#C4451C"
@@ -3514,8 +3778,8 @@ cellChatAnalysis <- function(){
 	  "CD8+ CM", "CD8+ TRM",     # Will become CD8+ T cell
 	  "Tumor 1", "Tumor 2", "Tumor 3", "Tumor 4", "Tumor 5", 
 	  "Tumor 6", "Tumor 7", "Tumor 8", "Tumor 9", "Tumor 10", "Tumor 11",  # Will become Tumor
-	  "CD4+ Treg", "Inflammatory", "Undefined", "TAM", "TA", 
-	  "Proliferative", "NK", "LAM"  # Keep as is
+	  "CD4+ Treg", "Inflammatory", "Undefined", "AA", "TA", 
+	  "Proliferative", "NK", "LAM", "Fibroblast 1", "Fibroblast 2"  # Keep as is
 	)
 
 	# Subset the Seurat object
@@ -3530,7 +3794,9 @@ cellChatAnalysis <- function(){
 
 	# Combine CD4+ subtypes into CD4+ T cell
 	SSM2sc_subset$cell_type_combined[SSM2sc_subset$cell_type_secondary %in% c("CD4+ CM", "CD4+ Naive")] <- "CD4+ T cell"
-
+	# Combine Fibroblast into one 
+	SSM2sc_subset$cell_type_combined[SSM2sc_subset$cell_type_secondary %in% c("Fibroblast 1", "Fibroblast 2")] <- "Fibroblasts"
+	
 	# Combine CD8+ subtypes into CD8+ T cell
 	SSM2sc_subset$cell_type_combined[SSM2sc_subset$cell_type_secondary %in% c("CD8+ CM", "CD8+ TRM")] <- "CD8+ T cell"
 
@@ -3542,7 +3808,7 @@ cellChatAnalysis <- function(){
 	cat("\nNew cell_type_combined distribution:\n")
 	print(table(SSM2sc_subset$cell_type_combined))
 
-	# Save the subset to Figure_7 folder
+	# Save the subset to Figure_8 folder
 	subset_output <- file.path(output_dir, "SSM2sc_subset.RDS")
 	cat("\nSaving subset to:", subset_output, "\n")
 	saveRDS(SSM2sc_subset, subset_output)
@@ -3773,7 +4039,7 @@ cellChatAnalysis <- function(){
 	cat("\n=== CELLCHAT ANALYSIS COMPLETE ===\n")
 	cat("All files saved to:", output_dir, "\n")
 	cat("\nFiles generated:\n")
-	cat("1. SSM2sc_subset.RDS (in Figure_7 folder)\n")
+	cat("1. SSM2sc_subset.RDS (in Figure_8 folder)\n")
 	cat("2. significant_pathways_placebo_vs_progesterone.pdf\n")
 	cat("3. significant_pathways_data.csv\n")
 	cat("4. heatmap_selected_pathways.pdf\n")
@@ -3788,9 +4054,9 @@ cellChatAnalysis <- function(){
 
 }
 
-figure7 <- function(){
-	print("Generating figure7")
-	output_dir <- file.path(figures_dir, "Figure_7")
+figure8 <- function(){
+	print("Generating figure8")
+	output_dir <- file.path(figures_dir, "Figure_8")
 	cellchatObjects=c("cellchat_placebo","cellchat_progesterone","cellchat_merged")
 	for (obj in cellchatObjects){
 		if (!(obj %in% ls(envir = .GlobalEnv))){
@@ -3803,20 +4069,20 @@ figure7 <- function(){
 	getData("SSM2sc_with_celltypes.RDS","SSM2sc")
 
 	# ============================================================================
-	# FIGURE 7: SPP1 EXPRESSION VIOLIN PLOT IN MACROPHAGES
+	# Figure 8: SPP1 EXPRESSION VIOLIN PLOT IN MACROPHAGES
 	# ============================================================================
 
 	loadLibrary(ggplot2)
 	loadLibrary(dplyr)
 	loadLibrary(Seurat)
 
-	# Set Figure 7 directory path
-	figure7_dir <- file.path(base_dir, "Figures", "Figure_7")
+	# Set Figure 8 directory path
+	figure8_dir <- file.path(base_dir, "Figures", "Figure_8")
 
 	print("=== CREATING SPP1 EXPRESSION VIOLIN PLOT ===")
 
 	# Define macrophage types (using your renamed types)
-	macrophage_types <- c("LAM", "TAM", "TA", "Proliferative", "Inflammatory", "Undefined")
+	macrophage_types <- c("LAM", "AA", "TA", "Proliferative", "Inflammatory", "Undefined")
 
 	# Subset to macrophages only
 	SSM2sc_macrophages <- subset(SSM2sc, subset = cell_type_secondary %in% macrophage_types)
@@ -3833,7 +4099,7 @@ figure7 <- function(){
 	# Set factor levels for cell types (to control order on x-axis)
 	spp1_data$Cell_Type <- factor(spp1_data$Cell_Type, 
 								  levels = c("Inflammatory", "LAM", "Proliferative", 
-											 "TA", "TAM", "Undefined"))
+											 "TA", "AA", "Undefined"))
 
 	# Capitalize treatment names
 	spp1_data$Treatment <- factor(spp1_data$Treatment,
@@ -3894,10 +4160,10 @@ figure7 <- function(){
 
 	print(p_spp1)
 
-	# Save plot to Figure_7 directory
-	ggsave(file.path(figure7_dir, "SPP1_expression_macrophages.pdf"),
+	# Save plot to Figure_8 directory
+	ggsave(file.path(figure8_dir, "SPP1_expression_macrophages.pdf"),
 		   p_spp1, width = 12, height = 8)
-	ggsave(file.path(figure7_dir, "SPP1_expression_macrophages.png"),
+	ggsave(file.path(figure8_dir, "SPP1_expression_macrophages.png"),
 		   p_spp1, width = 12, height = 8, dpi = 300)
 
 	# Save statistical results
@@ -3910,31 +4176,31 @@ figure7 <- function(){
 	)
 
 	write.csv(wilcox_df, 
-			  file.path(figure7_dir, "SPP1_expression_statistics.csv"), 
+			  file.path(figure8_dir, "SPP1_expression_statistics.csv"), 
 			  row.names = FALSE)
 
-	print("=== FIGURE 7 COMPLETE ===")
-	print(paste("SPP1 plot saved to:", file.path(figure7_dir, "SPP1_expression_macrophages.png")))
-	print(paste("Statistics saved to:", file.path(figure7_dir, "SPP1_expression_statistics.csv")))
+	print("=== Figure 8 COMPLETE ===")
+	print(paste("SPP1 plot saved to:", file.path(figure8_dir, "SPP1_expression_macrophages.png")))
+	print(paste("Statistics saved to:", file.path(figure8_dir, "SPP1_expression_statistics.csv")))
 
 	cat("\nStatistical test used: Wilcoxon rank-sum test (Mann-Whitney U test)")
 	cat("\nComparing progesterone vs placebo for each cell type independently\n")
 
 	# ============================================================================
-	# FIGURE 7: CD44 EXPRESSION VIOLIN PLOT IN T CELLS, NK CELLS, AND TUMOR CELLS
+	# Figure 8: CD44 EXPRESSION VIOLIN PLOT IN T CELLS, NK CELLS, AND TUMOR CELLS
 	# ============================================================================
 
 	loadLibrary(ggplot2)
 	loadLibrary(dplyr)
 	loadLibrary(Seurat)
 
-	# Set Figure 7 directory path
-	figure7_dir <- file.path(base_dir, "Figures", "Figure_7")
+	# Set Figure 8 directory path
+	figure8_dir <- file.path(base_dir, "Figures", "Figure_8")
 
 	print("=== CREATING CD44 EXPRESSION VIOLIN PLOT ===")
 
 	# Load the subset object
-	SSM2sc_subset <- readRDS(file.path(figure7_dir, "SSM2sc_subset.RDS"))
+	SSM2sc_subset <- readRDS(file.path(figure8_dir, "SSM2sc_subset.RDS"))
 
 	print(paste("Total cells in subset:", ncol(SSM2sc_subset)))
 
@@ -3946,15 +4212,14 @@ figure7 <- function(){
 	colnames(cd44_data) <- c("Expression", "Cell_Type", "Treatment")
 
 	# Define cell types to include (using the combined names)
-	cell_types_to_plot <- c("CD4+ T cell", "CD4+ Treg", "CD8+ T cell", "NK", "Tumor")
+	cell_types_to_plot <- c("CD4+ Treg", "CD8+ T cell", "NK")
 
 	# Filter for only these cell types
 	cd44_data <- cd44_data[cd44_data$Cell_Type %in% cell_types_to_plot, ]
 
 	# Set factor levels for cell types (to control order on x-axis)
 	cd44_data$Cell_Type <- factor(cd44_data$Cell_Type, 
-								  levels = c("CD4+ T cell", "CD4+ Treg", "CD8+ T cell", 
-											 "NK", "Tumor"))
+								  levels = c( "CD4+ Treg", "CD8+ T cell", "NK"))
 
 	# Treatment as factor
 	cd44_data$Treatment <- factor(cd44_data$Treatment,
@@ -4032,10 +4297,10 @@ figure7 <- function(){
 
 	print(p_cd44)
 
-	# Save plot to Figure_7 directory
-	ggsave(file.path(figure7_dir, "CD44_expression_T_NK_Tumor.pdf"),
+	# Save plot to Figure_8 directory
+	ggsave(file.path(figure8_dir, "CD44_expression_T_NK_Tumor.pdf"),
 		   p_cd44, width = 12, height = 8)
-	ggsave(file.path(figure7_dir, "CD44_expression_T_NK_Tumor.png"),
+	ggsave(file.path(figure8_dir, "CD44_expression_T_NK_Tumor.png"),
 		   p_cd44, width = 12, height = 8, dpi = 300)
 
 	# Save statistical results
@@ -4048,12 +4313,12 @@ figure7 <- function(){
 	)
 
 	write.csv(wilcox_df_cd44, 
-			  file.path(figure7_dir, "CD44_expression_statistics.csv"), 
+			  file.path(figure8_dir, "CD44_expression_statistics.csv"), 
 			  row.names = FALSE)
 
 	print("=== CD44 VIOLIN PLOT COMPLETE ===")
-	print(paste("CD44 plot saved to:", file.path(figure7_dir, "CD44_expression_T_NK_Tumor.png")))
-	print(paste("Statistics saved to:", file.path(figure7_dir, "CD44_expression_statistics.csv")))
+	print(paste("CD44 plot saved to:", file.path(figure8_dir, "CD44_expression_T_NK_Tumor.png")))
+	print(paste("Statistics saved to:", file.path(figure8_dir, "CD44_expression_statistics.csv")))
 
 	cat("\nStatistical test used: Wilcoxon rank-sum test (Mann-Whitney U test)")
 	cat("\nComparing progesterone vs placebo for each cell type independently\n")
@@ -4066,11 +4331,12 @@ Make_All_Figures <- function(){
 	#setup()
 	figure2()
 	figure3()
-	figure4()
-	figure5()
-	figure6()
+	Figure4()
+	Figure5()
+	Figure6()
+	Figure7()
 	cellChatAnalysis()
-	figure7()
+	figure8()
 }
 
 
@@ -4101,7 +4367,7 @@ Rscript ",script_path," 3 7
 
 
 if ( identical(parent.frame(), .GlobalEnv) && !interactive()) {
-  functionList=c(helpMessage,figure2,figure3,figure4,figure5,figure6,figure7)
+  functionList=c(helpMessage,figure2,figure3,Figure4,Figure5,Figure6,Figure7,figure8)
   args <- commandArgs(trailingOnly = TRUE)
   if (length(args) == 0){
   	print("Generating all figures")
@@ -4117,35 +4383,4 @@ if ( identical(parent.frame(), .GlobalEnv) && !interactive()) {
 	# ============================================================================
 	# END OF CODE
 	# ============================================================================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
